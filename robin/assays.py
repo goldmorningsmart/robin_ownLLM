@@ -66,11 +66,11 @@ async def experimental_assay(configuration: RobinConfiguration) -> str | None:
 
     # ### Step 2: Literature review on cell culture assays
 
-    logger.info("\nStep 2: Conducting literature search with FutureHouse platform...")
+    logger.info("\nStep 2: Conducting literature search with Edison platform...")
 
     assay_lit_review = await call_platform(
         queries=experimental_assay_queries_dict,
-        fh_client=configuration.fh_client,
+        fh_client=configuration.edison_client,
         job_name=configuration.agent_settings.assay_lit_search_agent,
     )
 
@@ -111,7 +111,18 @@ async def experimental_assay(configuration: RobinConfiguration) -> str | None:
         assay_proposal_messages
     )
 
-    assay_idea_json = json.loads(cast(str, experimental_assay_ideas.text))
+    response_text = cast(str, experimental_assay_ideas.text)
+    if not response_text.strip():
+        raise ValueError("LLM returned an empty response during assay proposal generation.")
+    try:
+        assay_idea_json = json.loads(response_text)
+    except json.JSONDecodeError:
+        match = re.search(r"\[.*\]", response_text, re.DOTALL)
+        if not match:
+            raise ValueError(
+                f"LLM response did not contain a JSON array. Response: {response_text[:200]}"
+            )
+        assay_idea_json = json.loads(match.group())
     assay_idea_list = format_assay_ideas(assay_idea_json)
 
     for assay_idea in assay_idea_list:
@@ -169,7 +180,7 @@ async def experimental_assay(configuration: RobinConfiguration) -> str | None:
 
     assay_hypotheses = await call_platform(
         queries=assay_hypothesis_queries,
-        fh_client=configuration.fh_client,
+        fh_client=configuration.edison_client,
         job_name=configuration.agent_settings.assay_hypothesis_report_agent,
     )
 
