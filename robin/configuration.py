@@ -296,7 +296,7 @@ class RobinConfiguration(BaseModel):
     llm_name: str = "o4-mini"
     llm_config: dict | None = Field(default_factory=get_default_llm_config)
     agent_settings: AgentConfig = Field(default_factory=AgentConfig)
-    _edison_client: EdisonClient | None = PrivateAttr(default=None)
+    _edison_client: str = "No need"
     _llm_client: LiteLLMModel | None = PrivateAttr(default=None)
 
     @model_validator(mode="after")
@@ -308,16 +308,8 @@ class RobinConfiguration(BaseModel):
         return self
 
     @property
-    def edison_client(self) -> EdisonClient:
-        if self._edison_client is None:
-            api_key = os.getenv("EDISON_API_KEY") or self.edison_api_key
-            if not api_key:
-                raise ValueError(
-                    "Edison API key is not set. Please provide it in the"
-                    " configuration or set EDISON_API_KEY env variable."
-                )
-            self._edison_client = EdisonClient(api_key=api_key)
-        return self._edison_client
+    def edison_client(self):
+        return 0
 
     @property
     def llm_client(self) -> LiteLLMModel:

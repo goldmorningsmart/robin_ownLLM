@@ -68,17 +68,17 @@ async def experimental_assay(configuration: RobinConfiguration) -> str | None:
     experimental_assay_queries_dict = {q: q for q in assay_literature_queries}
 
     # ### Step 2: Literature review on cell culture assays
-'''
-    logger.info("\nStep 2: Conducting literature search with Edison platform...")
+    '''
+        logger.info("\nStep 2: Conducting literature search with Edison platform...")
 
-    assay_lit_review = await call_platform(
-        queries=experimental_assay_queries_dict,
-        fh_client=configuration.edison_client,
-        job_name=configuration.agent_settings.assay_lit_search_agent,
-    )
+        assay_lit_review = await call_platform(
+            queries=experimental_assay_queries_dict,
+            fh_client=configuration.edison_client,
+            job_name=configuration.agent_settings.assay_lit_search_agent,
+        )
 
-    assay_lit_review_results = assay_lit_review["results"]
-'''
+        assay_lit_review_results = assay_lit_review["results"]
+    '''
     logger.info("\nStep 2: Conducting literature search with DeepSeek Platform...")
 
     # 1. 准备 DeepSeek 的配置（建议从环境变量或 config 中读取）
@@ -207,10 +207,42 @@ async def experimental_assay(configuration: RobinConfiguration) -> str | None:
     # ### Step 4: 替换原 call_platform 逻辑，使用 DeepSeek 生成报告
     # ==========================================================================
     logger.info("\nStep 4: Detailed investigation and evaluation via DeepSeek...")
+    def create_assay_hypothesis_queries(assay_idea_list: list[str]) -> dict[str, str]:
+        # 从配置中提取并格式化系统提示词
+        assay_hypothesis_system_prompt = (
+            configuration.prompts.assay_hypothesis_system_prompt.format(
+                disease_name=configuration.disease_name
+            )
+        )
 
-    import httpx
-    import os
+        # 从配置中提取并格式化输出格式要求
+        assay_hypothesis_format = configuration.prompts.assay_hypothesis_format.format(
+            disease_name=configuration.disease_name
+        )
 
+        assay_hypothesis_queries = {}
+
+        # 将占位符替换为换行符
+        formatted_assay_idea_list = [
+            item.replace("<|>", "\n") for item in assay_idea_list
+        ]
+
+        # 遍历每个实验想法，提取名称并拼接完整的 prompt
+        for assay in formatted_assay_idea_list:
+            assay_name = assay.split("Strategy:")[1].split("\n")[0].strip()
+            assay_hypothesis_queries[assay_name] = (
+                assay_hypothesis_system_prompt + assay + assay_hypothesis_format
+            )
+
+        return assay_hypothesis_queries
+
+
+    # ==========================================================================
+    # 调用函数生成查询字典
+    # ==========================================================================
+    assay_hypothesis_queries = create_assay_hypothesis_queries(
+        assay_idea_list=assay_idea_list
+    )
     # 从环境或配置中读取 DeepSeek 的凭证与基础路径
     DEEPSEEK_API_KEY = os.getenv("OPENAI_API_KEY", "从.env文件配置")  # 确保在 .env 文件中正确设置了 OPENAI_API_KEY
     DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
@@ -221,57 +253,70 @@ async def experimental_assay(configuration: RobinConfiguration) -> str | None:
     # 推荐对于这种需要“详细科学评估和假设生成（Hypothesis Generation）”的复杂学术任务
     # 使用带思维链的 deepseek-reasoner (R1) 模型。如果追求速度，可换回 deepseek-chat。
     MODEL_NAME = "deepseek-reasoner" 
+    all_results = []
+    errors_occurred = False
 
     async with httpx.AsyncClient(timeout=300.0) as client:
-        for assay_name, full_prompt_text in assay_hypothesis_queries.items():
-            logger.info(f"Generating detailed hypothesis report for assay: '{assay_name}' with DeepSeek...")
-            
-            try:
-                # 注意：原版 robin 脚本里是直接拼接了系统提示词、实验想法和格式要求。
-                # 在调用 ChatCompletion 时，我们直接作为 user 消息整体投喂给模型。
-                response = await client.post(
-                    f"{DEEPSEEK_BASE_URL}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-                        "Content-Type": "application/json"
-                    },
-                    json={
-                        "model": MODEL_NAME,
-                        "messages": [
-                            {
-                                "role": "user", 
-                                "content": full_prompt_text
-                            }
-                        ],
-                        "temperature": 0.3  # 报告生成建议保持较低随机性
-                    }
-                )
-                response.raise_for_status()
-                response_json = response.json()
+            # 对齐原版：hypothesis 变量实际装的是 assay_name，q 装的是全量 prompt
+            for hypothesis, q in assay_hypothesis_queries.items():
+                logger.info(f"Generating detailed hypothesis report for assay: '{hypothesis}' with DeepSeek...")
                 
-                # 提取模型生成的假说与评估报告文本
-                generated_report = response_json["choices"][0]["message"]["content"]
-                
-                # 依照原 robin 内部的数据格式封装，让 save_crow_files 能够正确解析并写入本地
-                # 这里的格式需要和下游的 has_hypothesis=True 处理逻辑对齐
-                deepseek_results.append({
-                    "assay_name": assay_name,
-                    "hypothesis": generated_report
-                })
-                
-            except Exception as e:
-                logger.error(f"DeepSeek failed to generate report for '{assay_name}': {e}")
-                deepseek_results.append({
-                    "assay_name": assay_name,
-                    "hypothesis": f"Error generating report via DeepSeek: {str(e)}"
-                })
+                try:
+                    response = await client.post(
+                        f"{DEEPSEEK_BASE_URL}/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                            "Content-Type": "application/json"
+                        },
+                        json={
+                            "model": MODEL_NAME,
+                            "messages": [
+                                {
+                                    "role": "user", 
+                                    "content": q
+                                }
+                            ],
+                            "temperature": 0.3
+                        }
+                    )
+                    response.raise_for_status()
+                    response_json = response.json()
+                    
+                    # 拿到了 DeepSeek 吐出的完整学术假说报告
+                    answer = response_json["choices"][0]["message"]["content"]
+                    result_context = f"Query: {q}\nAnswer: {answer}"
+                    
+                    # 【关键】完全对齐原版 call_platform 成功时的字典字段
+                    all_results.append({
+                        "hypothesis": hypothesis,       # 对应实验策略名称
+                        "query": q,                     # 对应的 Prompt
+                        "answer": answer,               # 核心：生成的假说报告
+                        "sources": "",                  # 关键：从 [] 改成 ""，防止下游调用 .strip() 报错
+                        "context": result_context,      # 拼接的上下文
+                        "status": "success",            # 状态标记
+                        "task_run_id": f"ds_task_{os.urandom(4).hex()}", # 伪造一个任务 ID
+                    })
+                    
+                except Exception as e:
+                                logger.error(f"DeepSeek failed to generate report for '{hypothesis}': {e}")
+                                errors_occurred = True
+                                all_results.append({
+                                    "hypothesis": hypothesis,
+                                    "query": q,
+                                    "answer": f"Error generating report via DeepSeek: {str(e)}", # 确保有 answer
+                                    "sources": "",                  # 确保有 sources 空串
+                                    "error": str(e),
+                                    "status": "DEEPSEEK_ERROR",
+                                    "task_run_id": f"ds_error_{os.urandom(4).hex()}",
+                                })
 
-    # 将格式重新包裹回原有框架所预期的 {"results": [...]} 结构
-    assay_hypotheses = {"results": deepseek_results}
+    # 包装成原版 call_platform 返回的最外层字典格式
+    assay_hypotheses = {
+        "results": all_results,
+        "count": len(all_results),
+        "has_errors": errors_occurred,
+    }
 
-    # ==========================================================================
-    # ### 保持原有的保存逻辑不变
-    # ==========================================================================
     save_crow_files(
         assay_hypotheses["results"],
         run_dir=f"robin_output/{configuration.run_folder_name}/experimental_assay_detailed_hypotheses",

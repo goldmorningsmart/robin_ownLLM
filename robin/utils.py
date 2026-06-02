@@ -67,175 +67,101 @@ async def gather_results(
     return await asyncio.gather(*tasks)
 
 
+import asyncio
+import os
+import httpx
+from typing import Any
+
 async def call_platform(  # noqa: PLR0912
-    queries: dict[str, str], fh_client: EdisonClient, job_name: JobNames
+    queries: dict[str, str], fh_client: Any, job_name: Any
 ) -> dict[str, Any]:
+    """
+    重构后的 call_platform 函数：放弃对原 Edison 平台的网络依赖，
+    改用 DeepSeek API 异步并发处理所有科学检索/假说评估任务，并完全对齐原版数据结构。
+    """
     logger.info(
-        f"Starting literature search for {len(queries)} queries using {job_name}."
+        f"Starting DeepSeek processing for {len(queries)} queries mimicking {job_name}."
     )
-    task_id_to_context: dict[str, dict[str, str]] = {}
-    submitted_ids: list[str] = []
 
-    for hypothesis, q in queries.items():
-        task_data = {
-            "name": job_name,
-            "query": q,
-        }
-        try:
-            task_run_id = fh_client.create_task(task_data)
-            if not isinstance(task_run_id, str):
-                logger.warning(
-                    "EdisonClient.create_task did not return a string ID for"
-                    f" query '{q}'. Got: {type(task_run_id)}. Skipping."
-                )
-                continue
-
-            task_id_to_context[task_run_id] = {"hypothesis": hypothesis, "query": q}
-            submitted_ids.append(task_run_id)
-        except Exception:
-            logger.exception(f"Failed to submit task for query '{q}'")
-
-    completed_tasks_results = []
-    try:
-        completed_tasks_results = await asyncio.wait_for(
-            gather_results(submitted_ids, fh_client), timeout=OVERALL_TIMEOUT
-        )
-    except TimeoutError:
-        logger.exception(
-            f"Overall operation timed out after {OVERALL_TIMEOUT} seconds."
-        )
-        final_statuses = {}
-
-        for task_id in submitted_ids:
-            try:
-                task_status_obj = await fh_client.get_task(task_id)
-                final_statuses[task_id] = task_status_obj.status
-            except Exception:
-                final_statuses[task_id] = "unknown (timeout during final fetch)"
-        return {
-            "hypothesis": hypothesis,
-            "error": f"Operation timed out after {OVERALL_TIMEOUT}s",
-            "submitted_tasks": task_id_to_context,
-            "final_statuses": final_statuses,
-        }
-    except Exception as gather_err:
-        logger.exception("An error occurred while gathering results")
-        return {
-            "hypothesis": hypothesis,
-            "error": f"Failed during result gathering: {gather_err!s}",
-            "submitted_tasks": task_id_to_context,
-        }
+    # 从环境读取配置，默认使用学术推理能力极强的 R1 模型 (deepseek-reasoner)
+    DEEPSEEK_API_KEY = os.getenv("OPENAI_API_KEY", "从.env文件配置")
+    DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+    MODEL_NAME = "deepseek-reasoner" 
 
     all_results = []
     errors_occurred = False
-    for task_result in completed_tasks_results:
-        if (
-            isinstance(task_result, dict)
-            and task_result.get("status") == "POLLING_ERROR"
-        ):
-            errors_occurred = True
-            current_task_id = str(task_result.get("task_id"))
 
-            task_context = task_id_to_context.get(current_task_id, {})
-            original_query = task_context.get(
-                "query", f"Unknown Query (Polling Error for {current_task_id})"
-            )
-            original_hypothesis = task_context.get("hypothesis", "Unknown Hypothesis")
-
-            error_message = task_result.get(
-                "error", "Polling failed with unknown error"
-            )
-            logger.error(
-                f"Polling failed for task {current_task_id} (Query:"
-                f" '{original_query}'): {error_message}"
-            )
-            all_results.append(
-                {
-                    "hypothesis": original_hypothesis,
-                    "query": original_query,
-                    "error": error_message,
-                    "status": "POLLING_ERROR",
-                    "task_run_id": current_task_id,
+    # 1. 定义单个任务的异步处理闭包，方便并发执行
+    async def process_single_query(client: httpx.AsyncClient, hypothesis: str, q: str) -> dict[str, Any]:
+        nonlocal errors_occurred
+        logger.info(f"Submitting query to DeepSeek for hypothesis/assay: '{hypothesis}'...")
+        
+        # 模拟原框架的 task_run_id 命名空间
+        fake_task_id = f"ds_{job_name.lower().replace('.', '_')}_{os.urandom(4).hex()}"
+        
+        try:
+            response = await client.post(
+                f"{DEEPSEEK_BASE_URL}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": MODEL_NAME,
+                    "messages": [{"role": "user", "content": q}],
+                    "temperature": 0.2
                 }
             )
-        elif isinstance(
-            task_result,
-            (
-                TaskResponse,
-                fh_client.get_task.__annotations__.get("return", type(None)),
-            ),
-        ):
-            current_task_id = str(task_result.task_id)
+            response.raise_for_status()
+            response_json = response.json()
+            
+            answer = response_json["choices"][0]["message"]["content"]
+            result_context = f"Query: {q}\nAnswer: {answer}"
 
-            task_context = task_id_to_context.get(current_task_id, {})
-            original_query = task_context.get(
-                "query", f"Unknown Query (Polling Error for {current_task_id})"
-            )
-            original_hypothesis = task_context.get("hypothesis", "Unknown Hypothesis")
+            # 完全对齐原版成功返回的元素结构，确保下游的 .strip() 不会引发 AttributeError
+            return {
+                "hypothesis": hypothesis,
+                "query": q,
+                "answer": answer,
+                "sources": "",               # 关键：设置为空字符串，兼容下游的 sources.strip()
+                "context": result_context,
+                "status": "success",
+                "task_run_id": fake_task_id,
+            }
 
-            if task_result.status == "success":
-                answer = task_result.answer
-                verbose_task_result = fh_client.get_task(
-                    task_result.task_id, verbose=True
-                )
-                sources = verbose_task_result.environment_frame["state"]["state"][
-                    "response"
-                ]["answer"]["references"]
-
-                result_context = f"Query: {original_query}\nAnswer: {answer}"
-
-                all_results.append(
-                    {
-                        "hypothesis": original_hypothesis,
-                        "query": original_query,
-                        "answer": answer,
-                        "sources": sources,
-                        "context": result_context,
-                        "status": "success",
-                        "task_run_id": current_task_id,
-                    }
-                )
-            else:
-                errors_occurred = True
-                error_message = (
-                    f"Task ended with status: {task_result.status}. Details:"
-                    f" {getattr(task_result, 'error_details', 'N/A')}"
-                )
-                logger.error(
-                    f"Task {current_task_id} for query '{original_query}' ended with"
-                    f" status: {task_result.status}"
-                )
-                all_results.append(
-                    {
-                        "hypothesis": original_hypothesis,
-                        "query": original_query,
-                        "error": error_message,
-                        "status": task_result.status,
-                        "task_run_id": current_task_id,
-                    }
-                )
-        else:
+        except Exception as err:
+            logger.error(f"DeepSeek task {fake_task_id} failed for '{hypothesis}': {err}")
             errors_occurred = True
-            logger.error(
-                "Received unexpected result type during processing:"
-                f" {type(task_result)}. Content: {task_result}"
-            )
-            all_results.append(
-                {
-                    "hypothesis": "Unknown Hypothesis (Result Error)",
-                    "query": "Unknown Query (Result Error)",
-                    "error": f"Received unexpected result type: {type(task_result)}",
-                    "status": "PROCESSING_ERROR",
-                    "task_run_id": getattr(task_result, "task_id", None),
-                }
-            )
-    logger.info(f"Finished processing {len(completed_tasks_results)} tasks.")
+            # 完全对齐原版异常返回的元素结构
+            return {
+                "hypothesis": hypothesis,
+                "query": q,
+                "answer": f"Error generating report via DeepSeek: {str(err)}",
+                "sources": "",
+                "error": str(err),
+                "status": "DEEPSEEK_ERROR",
+                "task_run_id": fake_task_id,
+            }
+
+    # 2. 使用 httpx 异步客户端并发发出所有请求
+    # 针对长文本/思维链生成，超时时间设为 5 分钟
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        tasks = [
+            process_single_query(client, hypothesis, q)
+            for hypothesis, q in queries.items()
+        ]
+        
+        # 并发执行所有查询并收集结果
+        all_results = await asyncio.gather(*tasks)
+
+    logger.info(f"Finished processing {len(all_results)} tasks with DeepSeek.")
+    
+    # 3. 包装成原函数最外层完全一致的字典响应
     return {
         "results": all_results,
         "count": len(all_results),
         "has_errors": errors_occurred,
     }
-
 
 def save_crow_files(
     data_list: list[dict[str, Any]],
