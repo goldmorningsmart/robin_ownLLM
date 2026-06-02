@@ -50,10 +50,11 @@ _DEFAULT_LLM_CONFIG_DATA = {
         {
             "model_name": "o4-mini",
             "litellm_params": {
-                "model": "o4-mini",
-                "api_key": "",
-                "timeout": 300,
-            },
+                "model": "deepseek/deepseek-v4-flash",
+                "api_key": "在.env文件配置",
+                "api_base": "https://api.deepseek.com/v1",
+                "timeout": 300
+            }
         }
     ]
 }

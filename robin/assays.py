@@ -4,6 +4,8 @@ import re
 from pathlib import Path
 from typing import cast
 
+import os
+import httpx
 import aiofiles
 import choix
 import pandas as pd
@@ -66,7 +68,7 @@ async def experimental_assay(configuration: RobinConfiguration) -> str | None:
     experimental_assay_queries_dict = {q: q for q in assay_literature_queries}
 
     # ### Step 2: Literature review on cell culture assays
-
+'''
     logger.info("\nStep 2: Conducting literature search with Edison platform...")
 
     assay_lit_review = await call_platform(
@@ -76,7 +78,61 @@ async def experimental_assay(configuration: RobinConfiguration) -> str | None:
     )
 
     assay_lit_review_results = assay_lit_review["results"]
+'''
+    logger.info("\nStep 2: Conducting literature search with DeepSeek Platform...")
 
+    # 1. 准备 DeepSeek 的配置（建议从环境变量或 config 中读取）
+    DEEPSEEK_API_KEY = os.getenv("OPENAI_API_KEY", "从.env文件配置")  # 确保在 .env 文件中正确设置了 OPENAI_API_KEY
+    DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"  # 或者是你本地/内网部署的网关地址
+
+    assay_lit_review_results = []
+
+    # 2. 使用 httpx 异步客户端并行或串行请求 DeepSeek
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        # 遍历你的 queries 字典（假设结构为 { "query_1": "...", "query_2": "..." }）
+        for query_key, query_text in experimental_assay_queries_dict.items():
+            logger.info(f"Processing {query_key} with DeepSeek...")
+            
+            system_prompt = (
+                "You are an expert scientific research assistant specializing in biomedical sciences "
+                "and experimental assay design. Provide a comprehensive, structured literature review "
+                "and protocol synthesis based on the provided keywords. Focus on cell models, "
+                "induction conditions, and functional readouts."
+            )
+            
+            try:
+                response = await client.post(
+                    f"{DEEPSEEK_BASE_URL}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": "deepseek-chat",  # 或者是 deepseek-reasoner (R1推理模型，强烈推荐用于科研)
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": f"Please review literature and propose assay setups for: {query_text}"}
+                        ],
+                        "temperature": 0.2
+                    }
+                )
+                response.raise_for_status()
+                result_json = response.json()
+                
+                # 提取 DeepSeek 返回的文本内容
+                content = result_json["choices"][0]["message"]["content"]
+                
+                # 保持原有的数据格式结构，以防后续 save_crow_files 报错
+                # 原版结构中每个 query 对应其生成的文献综述内容
+                assay_lit_review_results.append({
+                    "query": query_text,
+                    "review": content
+                })
+                
+            except Exception as e:
+                logger.error(f"Failed to get response from DeepSeek for {query_key}: {e}")
+                # 放入空数据防止完全中断
+                assay_lit_review_results.append({f"{query_key}": f"Error generating: {str(e)}"})
     save_crow_files(
         assay_lit_review_results,
         run_dir=f"robin_output/{configuration.run_folder_name}/experimental_assay_literature_reviews",
@@ -147,46 +203,75 @@ async def experimental_assay(configuration: RobinConfiguration) -> str | None:
 
     logger.info(f"Successfully exported to {assay_list_export_file}")
 
-    # ### Step 4: Generating reports for all assays
+    # ==========================================================================
+    # ### Step 4: 替换原 call_platform 逻辑，使用 DeepSeek 生成报告
+    # ==========================================================================
+    logger.info("\nStep 4: Detailed investigation and evaluation via DeepSeek...")
 
-    logger.info("\nStep 4: Detailed investigation and evaluation for each assay...")
+    import httpx
+    import os
 
-    def create_assay_hypothesis_queries(assay_idea_list: list[str]) -> dict[str, str]:
+    # 从环境或配置中读取 DeepSeek 的凭证与基础路径
+    DEEPSEEK_API_KEY = os.getenv("OPENAI_API_KEY", "从.env文件配置")  # 确保在 .env 文件中正确设置了 OPENAI_API_KEY
+    DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
 
-        assay_hypothesis_system_prompt = (
-            configuration.prompts.assay_hypothesis_system_prompt.format(
-                disease_name=configuration.disease_name
-            )
-        )
+    # 用来存放最终和原框架格式对齐的结果列表
+    deepseek_results = []
 
-        assay_hypothesis_format = configuration.prompts.assay_hypothesis_format.format(
-            disease_name=configuration.disease_name
-        )
+    # 推荐对于这种需要“详细科学评估和假设生成（Hypothesis Generation）”的复杂学术任务
+    # 使用带思维链的 deepseek-reasoner (R1) 模型。如果追求速度，可换回 deepseek-chat。
+    MODEL_NAME = "deepseek-reasoner" 
 
-        assay_hypothesis_queries = {}
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        for assay_name, full_prompt_text in assay_hypothesis_queries.items():
+            logger.info(f"Generating detailed hypothesis report for assay: '{assay_name}' with DeepSeek...")
+            
+            try:
+                # 注意：原版 robin 脚本里是直接拼接了系统提示词、实验想法和格式要求。
+                # 在调用 ChatCompletion 时，我们直接作为 user 消息整体投喂给模型。
+                response = await client.post(
+                    f"{DEEPSEEK_BASE_URL}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": MODEL_NAME,
+                        "messages": [
+                            {
+                                "role": "user", 
+                                "content": full_prompt_text
+                            }
+                        ],
+                        "temperature": 0.3  # 报告生成建议保持较低随机性
+                    }
+                )
+                response.raise_for_status()
+                response_json = response.json()
+                
+                # 提取模型生成的假说与评估报告文本
+                generated_report = response_json["choices"][0]["message"]["content"]
+                
+                # 依照原 robin 内部的数据格式封装，让 save_crow_files 能够正确解析并写入本地
+                # 这里的格式需要和下游的 has_hypothesis=True 处理逻辑对齐
+                deepseek_results.append({
+                    "assay_name": assay_name,
+                    "hypothesis": generated_report
+                })
+                
+            except Exception as e:
+                logger.error(f"DeepSeek failed to generate report for '{assay_name}': {e}")
+                deepseek_results.append({
+                    "assay_name": assay_name,
+                    "hypothesis": f"Error generating report via DeepSeek: {str(e)}"
+                })
 
-        formatted_assay_idea_list = [
-            item.replace("<|>", "\n") for item in assay_idea_list
-        ]
+    # 将格式重新包裹回原有框架所预期的 {"results": [...]} 结构
+    assay_hypotheses = {"results": deepseek_results}
 
-        for assay in formatted_assay_idea_list:
-            assay_name = assay.split("Strategy:")[1].split("\n")[0].strip()
-            assay_hypothesis_queries[assay_name] = (
-                assay_hypothesis_system_prompt + assay + assay_hypothesis_format
-            )
-
-        return assay_hypothesis_queries
-
-    assay_hypothesis_queries = create_assay_hypothesis_queries(
-        assay_idea_list=assay_idea_list
-    )
-
-    assay_hypotheses = await call_platform(
-        queries=assay_hypothesis_queries,
-        fh_client=configuration.edison_client,
-        job_name=configuration.agent_settings.assay_hypothesis_report_agent,
-    )
-
+    # ==========================================================================
+    # ### 保持原有的保存逻辑不变
+    # ==========================================================================
     save_crow_files(
         assay_hypotheses["results"],
         run_dir=f"robin_output/{configuration.run_folder_name}/experimental_assay_detailed_hypotheses",
