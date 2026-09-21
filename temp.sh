@@ -56,3 +56,14 @@ except Exception as e:
                 "timeout": 300,
             },
         },
+
+docker exec -it [容器ID或名称] /bin/sh
+docker start [容器ID或名称]
+docker run -d --name [旧容器名称] -p 8080:80 [镜像名称]
+docker cp [容器ID或容器名称]:[容器内文件的绝对路径] [宿主机的目标路径]
+
+docker cp 75ab78bccb3f:/app/robin_output ./my_output
+docker stop 75ab78bccb3f
+sudo docker run -d --name 75ab78bccb3f -p 8888:8888 --env-file .env robin
+
+sudo docker exec -it 75ab78bccb3f jupyter server password
